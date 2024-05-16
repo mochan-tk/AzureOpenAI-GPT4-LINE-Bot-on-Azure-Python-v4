@@ -17,43 +17,42 @@ import sys
 from argparse import ArgumentParser
 
 from flask import Flask, request, abort
-from linebot import (
-    LineBotApi, WebhookHandler
+from linebot.v3 import (
+    WebhookHandler
 )
-from linebot.exceptions import (
+from linebot.v3.exceptions import (
     InvalidSignatureError
 )
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    ReplyMessageRequest,
+    TextMessage
 )
-import openai
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent
+)
+from openai import AzureOpenAI
 
-# https://learn.microsoft.com/en-us/azure/cognitive-services/openai/chatgpt-quickstart?tabs=command-line&pivots=programming-language-python
-# openai.api_type = "azure"
-# openai.api_base = "https://azureopenaiservices0226.openai.azure.com/"
-# openai.api_version = "2022-12-01"
-# openai.api_key = "0e10eb24d9c24a79a91c6312fc0e7918"
-
-openai.api_type = "azure"
-openai.api_base = os.getenv("OPENAI_API_BASE")
-openai.api_version = "2023-05-15"
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/migration?tabs=python-new%2Cdalle-fix#chat-completions
+# client = AzureOpenAI(
+#   azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"), 
+#   api_key=os.getenv("AZURE_OPENAI_API_KEY"),  
+#   api_version="2024-02-01"
+# )
+client = AzureOpenAI(
+  azure_endpoint = os.getenv("OPENAI_API_BASE"), 
+  api_key=os.getenv("OPENAI_API_KEY"),  
+  api_version="2024-02-01"
+)
 
 app = Flask(__name__)
 
 # get channel_secret and channel_access_token from your environment variable
-channel_secret = os.getenv('LINE_CHANNEL_SECRET', None)
-channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', None)
-if channel_secret is None:
-    print('Specify LINE_CHANNEL_SECRET as environment variable.')
-    sys.exit(1)
-if channel_access_token is None:
-    print('Specify LINE_CHANNEL_ACCESS_TOKEN as environment variable.')
-    sys.exit(1)
-
-line_bot_api = LineBotApi(channel_access_token)
-handler = WebhookHandler(channel_secret)
-
+configuration = Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))
+handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -68,40 +67,52 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        app.logger.info("Invalid signature. Please check your channel access token/channel secret.")
         abort(400)
 
     return 'OK'
 
-
-@handler.add(MessageEvent, message=TextMessage)
-def message_text(event):
-
-    # https://learn.microsoft.com/en-us/azure/cognitive-services/openai/how-to/chatgpt
-    # https://github.com/openai/openai-cookbook/blob/main/examples/How_to_format_inputs_to_ChatGPT_models.ipynb
-    # response = openai.ChatCompletion.create(
-    #     engine="gpt-4", # engine = "deployment_name".
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=event.message.text)]
+            )
+        )
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    # https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/migration?tabs=python-new%2Cdalle-fix#chat-completions
+    # response = client.chat.completions.create(
+    #     model="gpt-35-turbo", # model = "deployment_name".
     #     messages=[
     #         {"role": "system", "content": "You are a helpful assistant."},
     #         {"role": "user", "content": "Does Azure OpenAI support customer managed keys?"},
     #         {"role": "assistant", "content": "Yes, customer managed keys are supported by Azure OpenAI."},
-    #         {"role": "user", "content": "Do other Azure Cognitive Services support this too?"}
+    #         {"role": "user", "content": "Do other Azure AI services support this too?"}
     #     ]
     # )
-    ## https://learn.microsoft.com/en-us/azure/cognitive-services/openai/chatgpt-quickstart?tabs=command-line&pivots=programming-language-python
-    response = openai.ChatCompletion.create(
-        engine=os.getenv("OPENAI_API_ENGINE_NAME"), # engine = "deployment_name".
+    # https://learn.microsoft.com/en-us/azure/cognitive-services/openai/chatgpt-quickstart?tabs=command-line&pivots=programming-language-python
+    # https://learn.microsoft.com/en-us/azure/ai-services/openai/gpt-v-quickstart?tabs=image%2Ccommand-line&pivots=programming-language-python
+    print('--------')
+    response = client.chat.completions.create(
+        model=os.getenv("OPENAI_API_ENGINE_NAME"), # model = "deployment_name".
         messages=[
             {"role": "user", "content": event.message.text}
         ]
     )
 
-    print(response['choices'][0]['message']['content'])
-
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=response['choices'][0]['message']['content'])
-    )
-
+    print(response.choices[0].message.content)
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=response.choices[0].message.content)]
+            )
+        )
 
 if __name__ == "__main__":
     arg_parser = ArgumentParser(
